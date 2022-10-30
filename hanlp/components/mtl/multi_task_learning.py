@@ -7,17 +7,20 @@ import logging
 import os
 from collections import defaultdict
 from copy import copy
-from typing import Union, List, Callable, Dict, Optional, Any, Iterable, Tuple, Set
 from itertools import chain
+from typing import Union, List, Callable, Dict, Optional, Any, Iterable, Tuple
+
 import numpy as np
 import torch
-from alnlp.modules import util
+from hanlp_common.constant import IDX, BOS, EOS
+from hanlp_common.document import Document
+from hanlp_common.util import merge_locals_kwargs, topological_sort, reorder, prefix_match
+from hanlp_common.visualization import markdown_table
 from toposort import toposort
 from torch.utils.data import DataLoader
 
-from hanlp_common.constant import IDX, BOS, EOS
+import hanlp.utils.torch_util
 from hanlp.common.dataset import PadSequenceDataLoader, PrefetchDataLoader, CachedDataLoader
-from hanlp_common.document import Document
 from hanlp.common.structure import History
 from hanlp.common.torch_component import TorchComponent
 from hanlp.common.transform import FieldLength, TransformList
@@ -29,10 +32,8 @@ from hanlp.layers.transformers.utils import pick_tensor_for_each_token
 from hanlp.metrics.metric import Metric
 from hanlp.metrics.mtl import MetricDict
 from hanlp.transform.transformer_tokenizer import TransformerSequenceTokenizer
-from hanlp_common.visualization import markdown_table
 from hanlp.utils.time_util import CountdownTimer
 from hanlp.utils.torch_util import clip_grad_norm
-from hanlp_common.util import merge_locals_kwargs, topological_sort, reorder, prefix_match
 
 
 class MultiTaskModel(torch.nn.Module):
@@ -97,7 +98,7 @@ class MultiTaskLearning(TorchComponent):
         can have dependencies on each other which will be properly handled during decoding. To integrate a component
         into this MTL framework, a component needs to implement the :class:`~hanlp.components.mtl.tasks.Task` interface.
 
-        This framework mostly follows the architecture of :cite:`clark-etal-2019-bam`, with additional scalar mix
+        This framework mostly follows the architecture of :cite:`clark-etal-2019-bam` and :cite:`he-choi-2021-stem`, with additional scalar mix
         tricks (:cite:`kondratyuk-straka-2019-75`) allowing each task to attend to any subset of layers. We also
         experimented with knowledge distillation on single tasks, the performance gain was nonsignificant on a large
         dataset. In the near future, we have no plan to invest more efforts in distillation, since most datasets HanLP
@@ -437,7 +438,8 @@ class MultiTaskLearning(TorchComponent):
     def build_model(self, training=False, **kwargs) -> torch.nn.Module:
         tasks = self.tasks
         encoder: ContextualWordEmbedding = self.config.encoder
-        encoder_size = encoder.get_output_dim()
+        transformer_module = encoder.module(training=training)
+        encoder_size = transformer_module.get_output_dim()
         scalar_mixes = torch.nn.ModuleDict()
         decoders = torch.nn.ModuleDict()
         use_raw_hidden_states = dict()
@@ -452,31 +454,31 @@ class MultiTaskLearning(TorchComponent):
                 encoder.scalar_mix = 0
             use_raw_hidden_states[task_name] = task.use_raw_hidden_states
         encoder.ret_raw_hidden_states = any(use_raw_hidden_states.values())
-        return MultiTaskModel(encoder.module(training=training), scalar_mixes, decoders, use_raw_hidden_states)
+        return MultiTaskModel(transformer_module, scalar_mixes, decoders, use_raw_hidden_states)
 
     def predict(self,
                 data: Union[str, List[str]],
-                batch_size: int = None,
                 tasks: Optional[Union[str, List[str]]] = None,
                 skip_tasks: Optional[Union[str, List[str]]] = None,
+                resolved_tasks=None,
                 **kwargs) -> Document:
         """Predict on data.
 
         Args:
             data: A sentence or a list of sentences.
-            batch_size: Decoding batch size.
             tasks: The tasks to predict.
             skip_tasks: The tasks to skip.
+            resolved_tasks: The resolved tasks to override ``tasks`` and ``skip_tasks``.
             **kwargs: Not used.
 
         Returns:
             A :class:`~hanlp_common.document.Document`.
         """
         doc = Document()
-        if not data:
+        if not data or not any(data):
             return doc
 
-        target_tasks = self.resolve_tasks(tasks, skip_tasks)
+        target_tasks = resolved_tasks or self.resolve_tasks(tasks, skip_tasks)
         flatten_target_tasks = [self.tasks[t] for group in target_tasks for t in group]
         cls_is_bos = any([x.cls_is_bos for x in flatten_target_tasks])
         sep_is_eos = any([x.sep_is_eos for x in flatten_target_tasks])
@@ -515,8 +517,11 @@ class MultiTaskLearning(TorchComponent):
                     if first_task_name.startswith('tok'):
                         spans = []
                         tokens = []
+                        output_spans = first_task.config.get('output_spans', None)
                         for span_per_sent, token_per_sent in zip(output_dict[first_task_name]['prediction'],
                                                                  results[first_task_name][-len(batch[IDX]):]):
+                            if output_spans:
+                                token_per_sent = [x[0] for x in token_per_sent]
                             if cls_is_bos:
                                 span_per_sent = [(-1, 0)] + span_per_sent
                                 token_per_sent = [BOS] + token_per_sent
@@ -675,7 +680,7 @@ class MultiTaskLearning(TorchComponent):
         task = self.tasks[task_name]
         if run_transform:
             batch = task.transform_batch(batch, results=results, cls_is_bos=cls_is_bos, sep_is_eos=sep_is_eos)
-        batch['mask'] = mask = util.lengths_to_mask(batch['token_length'])
+        batch['mask'] = mask = hanlp.utils.torch_util.lengths_to_mask(batch['token_length'])
         output_dict[task_name] = {
             'output': task.feed_batch(h,
                                       batch=batch,
@@ -762,8 +767,8 @@ class MultiTaskLearning(TorchComponent):
     def parallelize(self, devices: List[Union[int, torch.device]]):
         raise NotImplementedError('Parallelization is not implemented yet.')
 
-    def __call__(self, data, batch_size=None, **kwargs) -> Document:
-        return super().__call__(data, batch_size, **kwargs)
+    def __call__(self, data, **kwargs) -> Document:
+        return super().__call__(data, **kwargs)
 
     def __getitem__(self, task_name: str) -> Task:
         return self.tasks[task_name]
@@ -778,6 +783,8 @@ class MultiTaskLearning(TorchComponent):
             >>> del mtl['dep']  # Delete dep from MTL
 
         """
+        del self.config[task_name]
+        self.config.task_names.remove(task_name)
         del self.tasks[task_name]
         del self.model.decoders[task_name]
         del self._computation_graph[task_name]
@@ -791,3 +798,16 @@ class MultiTaskLearning(TorchComponent):
 
     def items(self):
         yield from self.tasks.items()
+
+    def __setattr__(self, key: str, value):
+        if key and key.startswith('dict') and not hasattr(self, key):
+            please_read_the_doc_ok = f'This MTL component has no {key}.'
+            matched_children = []
+            for name in self.config.task_names:
+                if hasattr(self[name], key):
+                    matched_children.append(name)
+            if matched_children:
+                please_read_the_doc_ok += f' Maybe you are looking for one of its tasks: {matched_children}. ' \
+                              f'For example, HanLP["{matched_children[0]}"].{key} = ...'
+            raise TypeError(please_read_the_doc_ok)
+        object.__setattr__(self, key, value)

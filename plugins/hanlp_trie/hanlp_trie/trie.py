@@ -14,13 +14,11 @@ class Node(object):
         self._children = {}
         self._value = value
 
-    def _add_child(self, char, value, overwrite=False):
+    def _get_or_add_child(self, char):
         child = self._children.get(char)
         if child is None:
-            child = Node(value)
+            child = Node(None)
             self._children[char] = child
-        elif overwrite:
-            child._value = value
         return child
 
     def transit(self, key):
@@ -40,9 +38,9 @@ class Node(object):
                 break
         return state
 
-    def _walk(self, prefix: str, ordered=False):
+    def _walk(self, prefix: Union[str, tuple], ordered=False):
         for char, child in sorted(self._children.items()) if ordered else self._children.items():
-            prefix_new = prefix + char
+            prefix_new = prefix + (char if isinstance(prefix, str) else (char,))
             if child._value:
                 yield prefix_new, child._value
             yield from child._walk(prefix_new)
@@ -79,12 +77,13 @@ class Trie(Node):
 
     def __setitem__(self, key, value):
         state = self
-        for i, char in enumerate(key):
-            if i < len(key) - 1:
-                state = state._add_child(char, None, False)
-            else:
-                state = state._add_child(char, value, True)
-        self._size += 1
+        for char in key[:-1]:
+            state = state._get_or_add_child(char)
+
+        leaf = state._get_or_add_child(key[-1])
+        if leaf._value is None:
+            self._size += 1
+        leaf._value = value
 
     def __delitem__(self, key):
         state = self.transit(key)
@@ -155,8 +154,8 @@ class Trie(Node):
             i += 1
         return found
 
-    def items(self, ordered=False):
-        yield from self._walk('', ordered)
+    def items(self, ordered=False, prefix=''):
+        yield from self._walk(prefix, ordered)
 
     def __len__(self):
         return self._size

@@ -2,14 +2,15 @@
 # Author: hankcs
 # Date: 2020-06-22 21:06
 import warnings
-from typing import Union, Dict, Any, Sequence
+from typing import Union, Dict, Any, Sequence, Tuple, Optional
 
 import torch
 from torch import nn
-
 from hanlp.layers.dropout import WordDropout
 from hanlp.layers.scalar_mix import ScalarMixWithDropout, ScalarMixWithDropoutBuilder
-from hanlp.layers.transformers.pt_imports import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer, AutoModel_
+from hanlp.layers.transformers.resource import get_tokenizer_mirror
+from hanlp.layers.transformers.pt_imports import PreTrainedModel, PreTrainedTokenizer, AutoTokenizer, AutoModel_, \
+    BertTokenizer, AutoTokenizer_
 from hanlp.layers.transformers.utils import transformer_encode
 
 
@@ -24,7 +25,7 @@ class TransformerEncoder(nn.Module):
                  max_sequence_length=None,
                  ret_raw_hidden_states=False,
                  transformer_args: Dict[str, Any] = None,
-                 trainable=True,
+                 trainable=Union[bool, Optional[Tuple[int, int]]],
                  training=True) -> None:
         """A pre-trained transformer encoder.
 
@@ -35,7 +36,7 @@ class TransformerEncoder(nn.Module):
             scalar_mix: Layer attention.
             word_dropout: Dropout rate of randomly replacing a subword with MASK.
             max_sequence_length: The maximum sequence length. Sequence longer than this will be handled by sliding
-                window.
+                window. If ``None``, then the ``max_position_embeddings`` of the transformer will be used.
             ret_raw_hidden_states: ``True`` to return hidden states of each layer.
             transformer_args: Extra arguments passed to the transformer.
             trainable: ``False`` to use static embeddings.
@@ -43,7 +44,6 @@ class TransformerEncoder(nn.Module):
         """
         super().__init__()
         self.ret_raw_hidden_states = ret_raw_hidden_states
-        self.max_sequence_length = max_sequence_length
         self.average_subwords = average_subwords
         if word_dropout:
             oov = transformer_tokenizer.mask_token_id
@@ -71,12 +71,23 @@ class TransformerEncoder(nn.Module):
             transformer_args['output_hidden_states'] = output_hidden_states
             transformer = AutoModel_.from_pretrained(transformer, training=training or not trainable,
                                                      **transformer_args)
+            if max_sequence_length is None:
+                max_sequence_length = transformer.config.max_position_embeddings
+        self.max_sequence_length = max_sequence_length
         if hasattr(transformer, 'encoder') and hasattr(transformer, 'decoder'):
             # For seq2seq model, use its encoder
             transformer = transformer.encoder
         self.transformer = transformer
         if not trainable:
             transformer.requires_grad_(False)
+        elif isinstance(trainable, tuple):
+            layers = []
+            if hasattr(transformer, 'embeddings'):
+                layers.append(transformer.embeddings)
+            layers.extend(transformer.encoder.layer)
+            for i, layer in enumerate(layers):
+                if i < trainable[0] or i >= trainable[1]:
+                    layer.requires_grad_(False)
 
         if isinstance(scalar_mix, ScalarMixWithDropoutBuilder):
             self.scalar_mix: ScalarMixWithDropout = scalar_mix.build()
@@ -115,10 +126,4 @@ class TransformerEncoder(nn.Module):
 
     @staticmethod
     def build_transformer_tokenizer(config_or_str, use_fast=True, do_basic_tokenize=True) -> PreTrainedTokenizer:
-        if isinstance(config_or_str, str):
-            transformer = config_or_str
-        else:
-            transformer = config_or_str.transformer
-        if use_fast and not do_basic_tokenize:
-            warnings.warn('`do_basic_tokenize=False` might not work when `use_fast=True`')
-        return AutoTokenizer.from_pretrained(transformer, use_fast=use_fast, do_basic_tokenize=do_basic_tokenize)
+        return AutoTokenizer_.from_pretrained(config_or_str, use_fast, do_basic_tokenize)

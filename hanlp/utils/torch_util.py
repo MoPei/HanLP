@@ -4,7 +4,7 @@
 import os
 import random
 import time
-from typing import List, Union
+from typing import List, Union, Dict, Tuple
 
 import numpy as np
 import torch
@@ -12,18 +12,23 @@ from pynvml import nvmlDeviceGetHandleByIndex, nvmlDeviceGetMemoryInfo, nvmlInit
 from torch import nn
 from torch.nn.utils.rnn import pad_sequence
 
-from hanlp.utils.log_util import logger
+from hanlp.utils.io_util import get_resource, replace_ext, TimingFileIterator
+from hanlp.utils.log_util import logger, flash
+from hanlp_common.constant import HANLP_VERBOSE
+from hanlp_common.io import load_pickle, save_pickle
 
 
-def gpus_available() -> dict:
+def gpus_available() -> Dict[int, float]:
+    if not torch.cuda.is_available():
+        return dict()
     try:
         nvmlInit()
         gpus = {}
         visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
-        if visible_devices:
-            visible_devices = {int(x.strip()) for x in visible_devices.split(',')}
-        else:
+        if visible_devices is None:
             visible_devices = list(range(nvmlDeviceGetCount()))
+        else:
+            visible_devices = {int(x.strip()) for x in visible_devices.split(',')}
         for i, real_id in enumerate(visible_devices):
             h = nvmlDeviceGetHandleByIndex(real_id)
             info = nvmlDeviceGetMemoryInfo(h)
@@ -42,16 +47,7 @@ def gpus_available() -> dict:
         return dict(sorted(gpus.items(), key=lambda x: x[1], reverse=True))
     except Exception as e:
         logger.debug(f'Failed to get gpu info due to {e}')
-        return {}
-
-
-def visuable_devices():
-    visible_devices = os.environ.get('CUDA_VISIBLE_DEVICES', None)
-    if visible_devices:
-        visible_devices = {int(x.strip()) for x in visible_devices.split(',')}
-    else:
-        visible_devices = list(range(torch.cuda.device_count()))
-    return visible_devices
+        return dict((i, 1.0) for i in range(torch.cuda.device_count()))
 
 
 def cuda_devices(query=None) -> List[int]:
@@ -157,7 +153,7 @@ def mean_model(model: torch.nn.Module):
 
 def main():
     start = time.time()
-    print(visuable_devices())
+    print(gpus_available())
     print(time.time() - start)
     # print(gpus_available())
     # print(cuda_devices())
@@ -185,3 +181,106 @@ def clip_grad_norm(model: nn.Module, grad_norm, transformer: nn.Module = None, t
                 non_transformer.append(p)
         nn.utils.clip_grad_norm_(non_transformer, grad_norm)
         nn.utils.clip_grad_norm_(is_transformer, transformer_grad_norm)
+
+
+def load_word2vec(path, delimiter=' ', cache=True) -> Tuple[Dict[str, np.ndarray], int]:
+    realpath = get_resource(path)
+    binpath = replace_ext(realpath, '.pkl')
+    if cache:
+        try:
+            flash('Loading word2vec from cache [blink][yellow]...[/yellow][/blink]')
+            word2vec, dim = load_pickle(binpath)
+            flash('')
+            return word2vec, dim
+        except IOError:
+            pass
+
+    dim = None
+    word2vec = dict()
+    f = TimingFileIterator(realpath)
+    for idx, line in enumerate(f):
+        f.log('Loading word2vec from text file [blink][yellow]...[/yellow][/blink]')
+        line = line.rstrip().split(delimiter)
+        if len(line) > 2:
+            if dim is None:
+                dim = len(line)
+            else:
+                if len(line) != dim:
+                    logger.warning('{}#{} length mismatches with {}'.format(path, idx + 1, dim))
+                    continue
+            word, vec = line[0], line[1:]
+            word2vec[word] = np.array(vec, dtype=np.float32)
+    dim -= 1
+    if cache:
+        flash('Caching word2vec [blink][yellow]...[/yellow][/blink]')
+        save_pickle((word2vec, dim), binpath)
+        flash('')
+    return word2vec, dim
+
+
+def load_word2vec_as_vocab_tensor(path, delimiter=' ', cache=True) -> Tuple[Dict[str, int], torch.Tensor]:
+    realpath = get_resource(path)
+    vocab_path = replace_ext(realpath, '.vocab')
+    matrix_path = replace_ext(realpath, '.pt')
+    if cache:
+        try:
+            if HANLP_VERBOSE:
+                flash('Loading vocab and matrix from cache [blink][yellow]...[/yellow][/blink]')
+            vocab = load_pickle(vocab_path)
+            matrix = torch.load(matrix_path, map_location='cpu')
+            if HANLP_VERBOSE:
+                flash('')
+            return vocab, matrix
+        except IOError:
+            pass
+
+    word2vec, dim = load_word2vec(path, delimiter, cache)
+    vocab = dict((k, i) for i, k in enumerate(word2vec.keys()))
+    matrix = torch.Tensor(np.stack(list(word2vec.values())))
+    if cache:
+        flash('Caching vocab and matrix [blink][yellow]...[/yellow][/blink]')
+        save_pickle(vocab, vocab_path)
+        torch.save(matrix, matrix_path)
+        flash('')
+    return vocab, matrix
+
+
+def save_word2vec(word2vec: dict, filepath, delimiter=' '):
+    with open(filepath, 'w', encoding='utf-8') as out:
+        for w, v in word2vec.items():
+            out.write(f'{w}{delimiter}')
+            out.write(f'{delimiter.join(str(x) for x in v)}\n')
+
+
+def lengths_to_mask(seq_len, max_len=None):
+    r"""
+    .. code-block::
+
+        >>> seq_len = torch.arange(2, 16)
+        >>> mask = lengths_to_mask(seq_len)
+        >>> print(mask.size())
+        torch.Size([14, 15])
+        >>> seq_len = np.arange(2, 16)
+        >>> mask = lengths_to_mask(seq_len)
+        >>> print(mask.shape)
+        (14, 15)
+        >>> seq_len = torch.arange(2, 16)
+        >>> mask = lengths_to_mask(seq_len, max_len=100)
+        >>>print(mask.size())
+        torch.Size([14, 100])
+
+    :param torch.LongTensor seq_len: (B,)
+    :param int max_len: max sequence length。
+    :return:  torch.Tensor  (B, max_len)
+    """
+    assert seq_len.dim() == 1, f"seq_len can only have one dimension, got {seq_len.dim() == 1}."
+    batch_size = seq_len.size(0)
+    max_len = int(max_len) if max_len else seq_len.max().long()
+    broad_cast_seq_len = torch.arange(max_len).expand(batch_size, -1).to(seq_len)
+    mask = broad_cast_seq_len.lt(seq_len.unsqueeze(1))
+
+    return mask
+
+
+def activation_from_name(name: str):
+    return getattr(torch.nn, name)

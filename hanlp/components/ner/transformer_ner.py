@@ -4,14 +4,13 @@
 import functools
 from typing import Union, List, Dict, Any, Set
 
-import torch
 from hanlp_trie import DictInterface, TrieDict
 
 from hanlp.common.dataset import SamplerBuilder
 from hanlp.components.taggers.transformers.transformer_tagger import TransformerTagger
 from hanlp.metrics.chunking.sequence_labeling import get_entities
 from hanlp.metrics.f1 import F1
-from hanlp.datasets.ner.json_ner import prune_ner_tagset
+from hanlp.datasets.ner.loaders.json_ner import prune_ner_tagset
 from hanlp.utils.string_util import guess_delimiter
 from hanlp_common.util import merge_locals_kwargs
 
@@ -23,7 +22,7 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
         (:cite:`lafferty2001conditional`) layer for
         NER task. It can utilize whitelist gazetteers which is dict mapping from entity name to entity type.
         During decoding, it performs longest-prefix-matching of these words to override the prediction from
-        underlining statistical model. It also uses a blacklist to mask out mis-predicted  entities.
+        underlying statistical model. It also uses a blacklist to mask out mis-predicted  entities.
 
         .. Note:: For algorithm beginners, longest-prefix-matching is the prerequisite to understand what dictionary can
             do and what it can't do. The tutorial in `this book <http://nlp.hankcs.com/book.php>`_ can be very helpful.
@@ -46,9 +45,7 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
     # noinspection PyMethodOverriding
     def decode_output(self, logits, mask, batch, model=None):
         output = super().decode_output(logits, mask, batch, model)
-        if isinstance(output, torch.Tensor):
-            output = output.tolist()
-        prediction = self.id_to_tags(output, [len(x) for x in batch['token']])
+        prediction = super().prediction_to_human(output, self.vocabs['tag'].idx_to_token, batch)
         return self.tag_to_span(prediction, batch)
 
     def tag_to_span(self, batch_tags, batch):
@@ -56,11 +53,15 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
         sents = batch[self.config.token_key]
         dict_whitelist = self.dict_whitelist
         dict_blacklist = self.dict_blacklist
+        merge_types = self.config.get('merge_types', None)
         for tags, tokens in zip(batch_tags, sents):
+            entities = get_entities(tags)
             if dict_whitelist:
-                for start, end, label in dict_whitelist.tokenize(tokens):
-                    if (tags[start].startswith('B') and tags[end - 1].startswith('E')) or all(
-                            x.startswith('S') for x in tags[start:end]):
+                matches = dict_whitelist.tokenize(tokens)
+                if matches:
+                    # Fix O E-LOC O like predictions
+                    entities = get_entities(tags)
+                    for label, start, end in entities:
                         if end - start == 1:
                             tags[start] = 'S-' + label
                         else:
@@ -68,7 +69,27 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
                             for i in range(start + 1, end - 1):
                                 tags[i] = 'I-' + label
                             tags[end - 1] = 'E-' + label
-            entities = get_entities(tags)
+                    for start, end, label in matches:
+                        if (not tags[start][0] in 'ME') and (not tags[end - 1][0] in 'BM'):
+                            if end - start == 1:
+                                tags[start] = 'S-' + label
+                            else:
+                                tags[start] = 'B-' + label
+                                for i in range(start + 1, end - 1):
+                                    tags[i] = 'I-' + label
+                                tags[end - 1] = 'E-' + label
+                    entities = get_entities(tags)
+            if merge_types and len(entities) > 1:
+                merged_entities = []
+                begin = 0
+                for i in range(1, len(entities)):
+                    if entities[begin][0] != entities[i][0] or entities[i - 1][2] != entities[i][1] \
+                            or entities[i][0] not in merge_types:
+                        merged_entities.append((entities[begin][0], entities[begin][1], entities[i - 1][2]))
+                        begin = i
+                merged_entities.append((entities[begin][0], entities[begin][1], entities[-1][2]))
+                entities = merged_entities
+
             if dict_blacklist:
                 pruned = []
                 delimiter_in_entity = self.config.get('delimiter_in_entity', ' ')
@@ -101,6 +122,7 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
 
     def fit(self, trn_data, dev_data, save_dir, transformer,
             delimiter_in_entity=None,
+            merge_types: List[str] = None,
             average_subwords=False,
             word_dropout: float = 0.2,
             hidden_dropout=None,
@@ -138,6 +160,7 @@ class TransformerNamedEntityRecognizer(TransformerTagger):
             transformer: An identifier of a pre-trained transformer.
             delimiter_in_entity: The delimiter between tokens in entity, which is used to rebuild entity by joining
                 tokens during decoding.
+            merge_types: The types of consecutive entities to be merged.
             average_subwords: ``True`` to average subword representations.
             word_dropout: Dropout rate to randomly replace a subword with MASK.
             hidden_dropout: Dropout rate applied to hidden states.

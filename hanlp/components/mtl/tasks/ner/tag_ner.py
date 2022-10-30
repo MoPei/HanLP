@@ -2,7 +2,7 @@
 # Author: hankcs
 # Date: 2020-12-03 14:35
 import logging
-from typing import Union, List, Dict, Any, Iterable, Callable, Set
+from typing import Union, List, Dict, Any, Iterable, Callable, Set, Sequence
 
 import torch
 from hanlp_trie import DictInterface
@@ -55,15 +55,18 @@ class TaggingNamedEntityRecognition(Task, TransformerNamedEntityRecognizer):
                  tagging_scheme=None,
                  crf=False,
                  delimiter_in_entity=None,
+                 merge_types: List[str] = None,
                  secondary_encoder=None,
                  token_key='token',
                  dict_whitelist: Union[DictInterface, Union[Dict[str, Any], Set[str]]] = None,
                  dict_blacklist: Union[DictInterface, Union[Dict[str, Any], Set[str]]] = None,
+                 dict_tags: Union[
+                     DictInterface, Union[Dict[Union[str, Sequence[str]], Union[str, Sequence[str]]]]] = None,
                  **kwargs) -> None:
         r"""A simple tagger using a linear layer with an optional CRF (:cite:`lafferty2001conditional`) layer for
         NER task. It can utilize whitelist gazetteers which is dict mapping from entity name to entity type.
         During decoding, it performs longest-prefix-matching of these words to override the prediction from
-        underlining statistical model. It also uses a blacklist to mask out mis-predicted  entities.
+        underlying statistical model. It also uses a blacklist to mask out mis-predicted  entities.
 
         .. Note:: For algorithm beginners, longest-prefix-matching is the prerequisite to understand what dictionary can
             do and what it can't do. The tutorial in `this book <http://nlp.hankcs.com/book.php>`_ can be very helpful.
@@ -89,6 +92,7 @@ class TaggingNamedEntityRecognition(Task, TransformerNamedEntityRecognizer):
             crf: ``True`` to enable CRF (:cite:`lafferty2001conditional`).
             delimiter_in_entity: The delimiter between tokens in entity, which is used to rebuild entity by joining
                 tokens during decoding.
+            merge_types: The types of consecutive entities to be merged.
             secondary_encoder: An optional secondary encoder to provide enhanced representation by taking the hidden
                 states from the main encoder as input.
             token_key: The key to tokens in dataset. This should always be set to ``token`` in MTL.
@@ -103,6 +107,7 @@ class TaggingNamedEntityRecognition(Task, TransformerNamedEntityRecognizer):
         self.secondary_encoder = secondary_encoder
         self.dict_whitelist = dict_whitelist
         self.dict_blacklist = dict_blacklist
+        self.dict_tags = dict_tags
 
     def build_dataloader(self,
                          data,
@@ -117,11 +122,12 @@ class TaggingNamedEntityRecognition(Task, TransformerNamedEntityRecognizer):
                     ['delimiter', 'max_seq_len', 'sent_delimiter', 'char_level', 'hard_constraint'] if k in self.config)
         dataset = self.build_dataset(data, cache=cache, transform=transform, **args)
         dataset.append_transform(self.vocabs)
+        dataset.purge_cache()
         if self.vocabs.mutable:
             self.build_vocabs(dataset, logger)
         return PadSequenceDataLoader(
             batch_sampler=self.sampler_builder.build(
-                self.compute_lens(data, dataset, 'token_input_ids', 'token'),
+                self.compute_lens(data, dataset),
                 shuffle=training, gradient_accumulation=gradient_accumulation),
             device=device,
             dataset=dataset)

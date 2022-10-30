@@ -10,6 +10,8 @@ from logging import LogRecord
 
 import termcolor
 
+from hanlp_common.constant import IPYTHON
+
 
 class ColoredFormatter(logging.Formatter):
     def __init__(self, fmt=None, datefmt=None, style='%', enable=True):
@@ -64,26 +66,35 @@ def enable_debug(debug=True):
 
 
 class ErasablePrinter(object):
-    def __init__(self):
+    def __init__(self, out=sys.stderr):
         self._last_print_width = 0
+        self.out = out
 
     def erase(self):
         if self._last_print_width:
-            sys.stdout.write("\b" * self._last_print_width)
-            sys.stdout.write(" " * self._last_print_width)
-            sys.stdout.write("\b" * self._last_print_width)
-            sys.stdout.write("\r")  # \r is essential when multi-lines were printed
+            if IPYTHON:
+                self.out.write("\r")
+                self.out.write(" " * self._last_print_width)
+            else:
+                self.out.write("\b" * self._last_print_width)
+                self.out.write(" " * self._last_print_width)
+                self.out.write("\b" * self._last_print_width)
+            self.out.write("\r")  # \r is essential when multi-lines were printed
             self._last_print_width = 0
 
     def print(self, msg: str, color=True):
         self.erase()
         if color:
-            msg, _len = color_format_len(msg)
+            if IPYTHON:
+                msg, _len = color_format_len(msg)
+                _len = len(msg)
+            else:
+                msg, _len = color_format_len(msg)
             self._last_print_width = _len
         else:
             self._last_print_width = len(msg)
-        sys.stdout.write(msg)
-        sys.stdout.flush()
+        self.out.write(msg)
+        self.out.flush()
 
 
 _printer = ErasablePrinter()
@@ -127,13 +138,13 @@ def _replace_color_offset(msg: str, color: str, ctrl: str):
     return ctrl.join(chunks), delta
 
 
-def cprint(*args, **kwargs):
+def cprint(*args, file=None, **kwargs):
     out = io.StringIO()
     print(*args, file=out, **kwargs)
     text = out.getvalue()
     out.close()
     c_text = color_format(text)
-    print(c_text, end='')
+    print(c_text, end='', file=file)
 
 
 def main():

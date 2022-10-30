@@ -14,7 +14,7 @@ from hanlp.common.transform import VocabDict, TransformList
 from hanlp.components.mtl.tasks import Task
 from hanlp.components.parsers.biaffine.biaffine_dep import BiaffineDependencyParser
 from hanlp.components.parsers.biaffine.biaffine_model import BiaffineDecoder
-from hanlp.datasets.parsing.conll_dataset import append_bos
+from hanlp.datasets.parsing.loaders.conll_dataset import append_bos
 from hanlp.layers.scalar_mix import ScalarMixWithDropoutBuilder
 from hanlp.metrics.metric import Metric
 from hanlp.metrics.mtl import MetricDict
@@ -114,18 +114,17 @@ class BiaffineDependencyParsing(Task, BiaffineDependencyParser):
                          logger: logging.Logger = None, gradient_accumulation=1, **kwargs) -> DataLoader:
         transform.insert(0, append_bos)
         dataset = BiaffineDependencyParser.build_dataset(self, data, transform)
-        if isinstance(data, str):
-            dataset.purge_cache()
+        dataset.purge_cache()
         if self.vocabs.mutable:
             BiaffineDependencyParser.build_vocabs(self, dataset, logger, transformer=True)
-        if dataset.cache:
+        if isinstance(data, str):
             timer = CountdownTimer(len(dataset))
             BiaffineDependencyParser.cache_dataset(self, dataset, timer, training, logger)
         max_seq_len = self.config.get('max_seq_len', None)
         if max_seq_len and isinstance(data, str):
-            dataset.prune(lambda x: len(x['token_input_ids']) > 510, logger)
+            dataset.prune(lambda x: len(x['token_input_ids']) > max_seq_len, logger)
         return PadSequenceDataLoader(
-            batch_sampler=self.sampler_builder.build(self.compute_lens(data, dataset, length_field='FORM'),
+            batch_sampler=self.sampler_builder.build(self.compute_lens(data, dataset),
                                                      shuffle=training, gradient_accumulation=gradient_accumulation),
             device=device,
             dataset=dataset,
@@ -164,4 +163,4 @@ class BiaffineDependencyParsing(Task, BiaffineDependencyParser):
             yield result
 
     def build_samples(self, inputs, cls_is_bos=False, sep_is_eos=False):
-        return [{'FORM': token + [EOS] if sep_is_eos else []} for token in inputs]
+        return [{'FORM': token + ([EOS] if sep_is_eos else [])} for token in inputs]

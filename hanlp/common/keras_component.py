@@ -11,7 +11,7 @@ import numpy as np
 import tensorflow as tf
 
 import hanlp.utils
-from hanlp_common.io import save_json,load_json
+from hanlp_common.io import save_json, load_json
 from hanlp.callbacks.fine_csv_logger import FineCSVLogger
 from hanlp.common.component import Component
 from hanlp.common.transform_tf import Transform
@@ -22,7 +22,7 @@ from hanlp.utils import io_util
 from hanlp.utils.io_util import get_resource, tempdir_human
 from hanlp.utils.log_util import init_logger, logger
 from hanlp.utils.string_util import format_scores
-from hanlp.utils.tf_util import format_metrics, size_of_dataset, summary_of_model, get_callback_by_class
+from hanlp.utils.tf_util import format_metrics, size_of_dataset, summary_of_model, get_callback_by_class, NumpyEncoder
 from hanlp.utils.time_util import Timer, now_datetime
 from hanlp_common.reflection import str_to_type, classpath_of
 from hanlp_common.structure import SerializableDict
@@ -255,7 +255,8 @@ class KerasComponent(Component, ABC):
         if isinstance(optimizer, (str, dict)):
             custom_objects = {'AdamWeightDecay': AdamWeightDecay}
             optimizer: tf.keras.optimizers.Optimizer = tf.keras.utils.deserialize_keras_object(optimizer,
-                                                                                               module_objects=vars(tf.keras.optimizers),
+                                                                                               module_objects=vars(
+                                                                                                   tf.keras.optimizers),
                                                                                                custom_objects=custom_objects)
         self.config.optimizer = tf.keras.utils.serialize_keras_object(optimizer)
         return optimizer
@@ -288,7 +289,7 @@ class KerasComponent(Component, ABC):
         pass
 
     def fit(self, trn_data, dev_data, save_dir, batch_size, epochs, run_eagerly=False, logger=None, verbose=True,
-            **kwargs):
+            finetune: str = None, **kwargs):
         self._capture_config(locals())
         self.transform = self.build_transform(**self.config)
         if not save_dir:
@@ -303,6 +304,12 @@ class KerasComponent(Component, ABC):
         self.config.train_steps = train_steps_per_epoch * epochs if num_examples else None
         model, optimizer, loss, metrics = self.build(**merge_dict(self.config, logger=logger, training=True))
         logger.info('Model built:\n' + summary_of_model(self.model))
+        if finetune:
+            finetune = get_resource(finetune)
+            if os.path.isdir(finetune):
+                finetune = os.path.join(finetune, 'model.h5')
+            model.load_weights(finetune, by_name=True, skip_mismatch=True)
+            logger.info(f'Loaded pretrained weights from {finetune} for finetuning')
         self.save_config(save_dir)
         self.save_vocabs(save_dir)
         self.save_meta(save_dir)
@@ -335,7 +342,7 @@ class KerasComponent(Component, ABC):
             trained_epoch = len(history.epoch)
             logger.info('Trained {} epochs in {}, each epoch takes {}'.
                         format(trained_epoch, delta_time, delta_time / trained_epoch if trained_epoch else delta_time))
-            save_json(history.history, io_util.path_join(save_dir, 'history.json'), cls=io_util.NumpyEncoder)
+            save_json(history.history, io_util.path_join(save_dir, 'history.json'), cls=NumpyEncoder)
             monitor_history: List = history.history.get(checkpoint.monitor, None)
             if monitor_history:
                 best_epoch_ago = len(monitor_history) - monitor_history.index(checkpoint.best)
@@ -431,6 +438,7 @@ class KerasComponent(Component, ABC):
             for output in self.predict_batch(batch, inputs=inputs, **kwargs):
                 results.append(output)
             num_samples += samples_in_batch
+        self.transform.cleanup()
 
         if flat:
             return results[0]

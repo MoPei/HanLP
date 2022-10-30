@@ -8,8 +8,8 @@ from typing import List, Union
 
 from phrasetree.tree import Tree
 
-from hanlp_common.conll import CoNLLUWord, CoNLLSentence
-from hanlp_common.constant import PRED
+from hanlp_common.conll import CoNLLUWord, CoNLLSentence, CoNLLSentenceList
+from hanlp_common.constant import PRED, IPYTHON
 from hanlp_common.util import collapse_json, prefix_match
 from hanlp_common.visualization import tree_to_list, list_to_tree, render_labeled_span, make_table
 
@@ -113,9 +113,15 @@ class Document(dict):
             A :class:`~hanlp_common.conll.CoNLLSentence` representation.
 
         """
-        results = []
-        if not self[tok]:
+        tok = prefix_match(tok, self)
+        lem = prefix_match(lem, self)
+        pos = prefix_match(pos, self)
+        dep = prefix_match(dep, self)
+        sdp = prefix_match(sdp, self)
+        results = CoNLLSentenceList()
+        if not tok or not self[tok]:
             return results
+        self = self._to_doc_without_spans(tok)
         flat = isinstance(self[tok][0], str)
         if flat:
             d = Document((k, [v]) for k, v in self.items())
@@ -143,9 +149,9 @@ class Document(dict):
         return results
 
     def to_pretty(self, tok='tok', lem='lem', pos='pos', dep='dep', sdp='sdp', ner='ner', srl='srl', con='con',
-                  show_header=True) -> str:
+                  show_header=True, html=False) -> Union[str, List[str]]:
         """
-        Convert to a pretty text representation which can be printed to visualize linguistics structures.
+        Convert to a pretty text representation which can be printed to visualize linguistic structures.
 
         Args:
             tok: Token key.
@@ -156,7 +162,8 @@ class Document(dict):
             ner: Named entity key.
             srl: Semantic role labeling key.
             con: Constituency parsing key.
-            show_header: ``True`` to print a header which indicates each field with its name.
+            show_header: ``True`` to include a header which indicates each field with its name.
+            html: ``True`` to output HTML format so that non-ASCII characters can align correctly.
 
         Returns:
             A pretty string.
@@ -196,7 +203,7 @@ class Document(dict):
                     if not start_offsets[b] or e > start_offsets[b][-1]:
                         start_offsets[b] = (ent, label, b, e)
                 ner_per_sample = [y for y in start_offsets if y]
-                header = ['Tok', 'NER', 'Type']
+                header = ['Token', 'NER', 'Type']
                 block = [[] for _ in range(length + 1)]
                 _ner = []
                 _type = []
@@ -222,7 +229,7 @@ class Document(dict):
                     if not pas:
                         continue
                     block = [[] for _ in range(length + 1)]
-                    header = ['Tok', 'SRL', f'PA{k + 1}']
+                    header = ['Token', 'SRL', f'PA{k + 1}']
                     _srl = []
                     _type = []
                     offset = 0
@@ -239,9 +246,13 @@ class Document(dict):
                         _srl[p_index] = '╟──►'
                         # _type[j] = 'V'
                         if len(block) != len(_srl) + 1:
-                            warnings.warn(f'Unable to visualize overlapped spans: {pas}')
+                            # warnings.warn(f'Unable to visualize overlapped spans: {pas}')
                             continue
                         block[0].extend(header)
+                        while len(_srl) < length:
+                            _srl.append('')
+                        while len(_type) < length:
+                            _type.append('')
                         for j, (_s, _t) in enumerate(zip(_srl, _type)):
                             block[j + 1].extend((tokens[j], _s, _t))
                     text = condense(block, extras)
@@ -251,11 +262,11 @@ class Document(dict):
                     con_samples: List[Tree] = [con_samples]
                 tree = con_samples[i]
                 block = [[] for _ in range(length + 1)]
-                block[0].extend(('Tok', 'PoS'))
+                block[0].extend(('Token', 'PoS'))
                 for j, t in enumerate(tree.pos()):
                     block[j + 1].extend(t)
 
-                for height in range(2, tree.height()):
+                for height in range(2, tree.height() + (0 if len(tree) == 1 else 1)):
                     offset = 0
                     spans = []
                     labels = []
@@ -297,16 +308,20 @@ class Document(dict):
                                     block[j + 1][-2] = '────'
                                 if not block[j + 1][-4]:
                                     block[j + 1][-4] = '────'
+                # If the root label is shorter than the level number, extend it to the same length
+                level_len = len(block[0][-1])
+                for row in block[1:]:
+                    if row[-1] and len(row[-1]) < level_len:
+                        row[-1] = row[-1] + ' ' * (level_len - len(row[-1]))
 
                 text = condense(block)
                 # Cosmetic issues
-                for row in text:
+                for row in text[1:]:
                     while '  ─' in row[1]:
                         row[1] = row[1].replace('  ─', ' ──')
-                    row[1] = row[1].replace('─  │', '───┤')
-                    row[1] = row[1].replace('─  ├', '───┼')
-                    row[1] = re.sub(r'►(\w+)(\s+)([│├])', lambda
-                        m: f'►{m.group(1)}{"─" * len(m.group(2))}{"┤" if m.group(3) == "│" else "┼"}', row[1])
+                    row[1] = row[1].replace('─ ─', '───')
+                    row[1] = re.sub(r'([►─])([\w-]*)(\s+)([│├])', lambda
+                        m: f'{m.group(1)}{m.group(2)}{"─" * len(m.group(3))}{"┤" if m.group(4) == "│" else "┼"}', row[1])
                     row[1] = re.sub(r'►(─+)►', r'─\1►', row[1])
                 for r, s in zip(extras, text):
                     r.extend(s)
@@ -321,14 +336,41 @@ class Document(dict):
                 results.append(make_table(extras, insert_header=True))
             else:
                 results.append(' '.join(['/'.join(str(f) for f in x.nonempty_fields) for x in conll]))
+        if html:
+            def to_html(pretty_text: str) -> str:
+                lines = [x for x in pretty_text.split('\n') if x]
+                cells = []
+                for line in lines:
+                    cells.append(line.split('\t'))
+
+                num_cols = len(cells[0])
+                cols = []
+
+                for i in range(num_cols):
+                    cols.append([])
+                    for row in cells:
+                        cols[-1].append(row[i])
+
+                html = '<div style="display: table; padding-bottom: 1rem;">'
+                for i, each in enumerate(cols):
+                    html += '<pre style="display: table-cell; font-family: SFMono-Regular,Menlo,Monaco,Consolas,' \
+                            'Liberation Mono,Courier New,monospace; white-space: nowrap; line-height: 128%; padding: 0;">'
+                    if i != len(cols) - 1:
+                        each = [x + ' ' for x in each]
+                    html += '<br>'.join([x.replace(' ', '&nbsp;') for x in each])
+                    html += '</pre>'
+                html += '</div>'
+                return html
+
+            results = [to_html(x) for x in results]
         if flat:
             return results[0]
         return results
 
     def pretty_print(self, tok='tok', lem='lem', pos='pos', dep='dep', sdp='sdp', ner='ner', srl='srl', con='con',
-                     show_header=True):
+                     show_header=True, html=IPYTHON):
         """
-        Print a pretty text representation which visualizes linguistics structures.
+        Print a pretty text representation which visualizes linguistic structures.
 
         Args:
             tok: Token key.
@@ -340,13 +382,18 @@ class Document(dict):
             srl: Semantic role labeling key.
             con: Constituency parsing key.
             show_header: ``True`` to print a header which indicates each field with its name.
+            html: ``True`` to output HTML format so that non-ASCII characters can align correctly.
 
         """
-        results = self.to_pretty(tok, lem, pos, dep, sdp, ner, srl, con, show_header)
+        results = self.to_pretty(tok, lem, pos, dep, sdp, ner, srl, con, show_header, html=html)
         if isinstance(results, str):
             results = [results]
-        sent_new_line = '\n\n' if any('\n' in x for x in results) else '\n'
-        print(sent_new_line.join(results))
+        if html and IPYTHON:
+            from IPython.core.display import display, HTML
+            display(HTML('<br>'.join(results)))
+        else:
+            sent_new_line = '\n\n' if any('\n' in x for x in results) else '\n'
+            print(sent_new_line.join(results))
 
     def translate(self, lang, tok='tok', pos='pos', dep='dep', sdp='sdp', ner='ner', srl='srl'):
         """
@@ -390,11 +437,14 @@ class Document(dict):
                         anno_per_sent[i] = translate.get(v, v)
         return self
 
-    def squeeze(self):
+    def squeeze(self, i=0):
         r"""
-        Squeeze the dimension of each field into one. It's intended to convert a nested document like ``[[sent1]]``
-        to ``[sent1]``. When there are multiple sentences, only the first one will be returned. Note this is not a
+        Squeeze the dimension of each field into one. It's intended to convert a nested document like ``[[sent_i]]``
+        to ``[sent_i]``. When there are multiple sentences, only the ``i-th`` one will be returned. Note this is not an
         inplace operation.
+
+        Args:
+            i: Keep the element at ``index`` for all ``list``s.
 
         Returns:
             A squeezed document with only one sentence.
@@ -402,5 +452,57 @@ class Document(dict):
         """
         sq = Document()
         for k, v in self.items():
-            sq[k] = v[0] if isinstance(v, list) else v
+            sq[k] = v[i] if isinstance(v, list) else v
         return sq
+
+    def _to_doc_without_spans(self, tok: str):
+        """
+        Remove the spans attached to tokens and return a new document.
+
+        Args:
+            tok: The key to tokens.
+
+        Returns:
+            A new document or itself.
+
+        """
+        tokens: Union[List[str], List[List[str]], List[str, int, int],
+                      List[List[str, int, int]]] = self[tok]
+        if isinstance(tokens[0], str):
+            return self
+        elif isinstance(tokens[0][-1], int):
+            tokens = [x[0] for x in tokens]
+        elif isinstance(tokens[0][-1], str):
+            return self
+        else:
+            tokens = [[t[0] for t in x] for x in tokens]
+        d = Document(**self)
+        d[tok] = tokens
+        return d
+
+    def get_by_prefix(self, prefix: str):
+        """
+        Get value by the prefix of a key.
+
+        Args:
+            prefix: The prefix of a key. If multiple keys are matched, only the first one will be used.
+
+        Returns:
+            The value assigned with the matched key.
+        """
+        key = prefix_match(prefix, self)
+        if not key:
+            return None
+        return self[key]
+
+    def count_sentences(self) -> int:
+        """
+        Count number of sentences in this document.
+
+        Returns:
+            Number of sentences.
+        """
+        tok = self.get_by_prefix('tok')
+        if isinstance(tok[0], str):
+            return 1
+        return len(tok)

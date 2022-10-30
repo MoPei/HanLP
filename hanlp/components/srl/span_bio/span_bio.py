@@ -7,7 +7,6 @@ from typing import Union, List, Callable, Dict, Any
 from bisect import bisect
 import torch
 import torch.nn.functional as F
-from alnlp.modules.util import lengths_to_mask
 from torch import nn
 from torch.utils.data import DataLoader
 
@@ -18,7 +17,7 @@ from hanlp.common.torch_component import TorchComponent
 from hanlp.common.transform import FieldLength
 from hanlp.common.vocab import Vocab
 from hanlp.components.srl.span_bio.baffine_tagging import SpanBIOSemanticRoleLabelingModel
-from hanlp.datasets.srl.conll2012 import CoNLL2012SRLBIODataset
+from hanlp.datasets.srl.loaders.conll2012 import CoNLL2012SRLBIODataset
 from hanlp.layers.crf.crf import CRF
 from hanlp.layers.embeddings.contextual_word_embedding import find_transformer
 from hanlp.layers.embeddings.embedding import Embedding
@@ -27,7 +26,7 @@ from hanlp.metrics.chunking.sequence_labeling import get_entities
 from hanlp.metrics.f1 import F1
 from hanlp.utils.string_util import guess_delimiter
 from hanlp.utils.time_util import CountdownTimer
-from hanlp.utils.torch_util import clip_grad_norm
+from hanlp.utils.torch_util import clip_grad_norm, lengths_to_mask
 from hanlp_common.util import merge_locals_kwargs, reorder
 
 
@@ -169,16 +168,17 @@ class SpanBIOSemanticRoleLabeler(TorchComponent):
     def decode_output(self, pred, mask, batch, decoder=None):
         # naive = self.naive_decode(pred, mask, batch, decoder)
         vocab = self.vocabs['srl'].idx_to_token
-        if self.config.crf:
-            if not decoder:
-                decoder = self.model.decoder
-            crf: CRF = decoder.crf
-            token_index, mask = mask
-            pred = crf.decode(pred, mask)
-            pred = sum(pred, [])
-        else:
-            pred = pred[mask].argmax(-1)
-            pred = pred.tolist()
+        if mask is not None:
+            if self.config.crf:
+                if not decoder:
+                    decoder = self.model.decoder
+                crf: CRF = decoder.crf
+                token_index, mask = mask
+                pred = crf.decode(pred, mask)
+                pred = sum(pred, [])
+            else:
+                pred = pred[mask].argmax(-1)
+                pred = pred.tolist()
         pred = [vocab[x] for x in pred]
         results = []
         offset = 0
@@ -247,12 +247,15 @@ class SpanBIOSemanticRoleLabeler(TorchComponent):
                          sampler_builder: SamplerBuilder = None,
                          gradient_accumulation=1,
                          shuffle=False, device=None, logger: logging.Logger = None,
+                         transform=None,
                          **kwargs) -> DataLoader:
         if isinstance(data, TransformableDataset):
             dataset = data
         else:
-            dataset = self.build_dataset(data, [self.config.embed.transform(vocabs=self.vocabs), self.vocabs,
-                                                FieldLength('token')])
+            transforms = [self.config.embed.transform(vocabs=self.vocabs), self.vocabs, FieldLength('token')]
+            if transform:
+                transforms.insert(0, transform)
+            dataset = self.build_dataset(data, transforms)
         if self.vocabs.mutable:
             # noinspection PyTypeChecker
             self.build_vocabs(dataset, logger)
@@ -333,6 +336,7 @@ class SpanBIOSemanticRoleLabeler(TorchComponent):
             eval_trn=False,
             logger=None,
             devices: Union[float, int, List[int]] = None,
+            transform=None,
             **kwargs):
         return super().fit(**merge_locals_kwargs(locals(), kwargs))
 

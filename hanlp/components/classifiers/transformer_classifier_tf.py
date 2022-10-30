@@ -5,22 +5,21 @@
 import math
 from typing import Union, Tuple, Any, Iterable
 import tensorflow as tf
-from bert.tokenization.bert_tokenization import FullTokenizer
 from hanlp.common.keras_component import KerasComponent
 from hanlp_common.structure import SerializableDict
 from hanlp.layers.transformers.loader_tf import build_transformer
 from hanlp.optimizers.adamw import create_optimizer
-from hanlp.transform.table import TableTransform
+from hanlp.transform.table_tf import TableTransform
 from hanlp.utils.log_util import logger
 from hanlp_common.util import merge_locals_kwargs
-
+from transformers.tokenization_utils import PreTrainedTokenizer
 
 class TransformerTextTransform(TableTransform):
 
     def __init__(self, config: SerializableDict = None, map_x=False, map_y=True, x_columns=None,
                  y_column=-1, skip_header=True, delimiter='auto', multi_label=False, **kwargs) -> None:
         super().__init__(config, map_x, map_y, x_columns, y_column, multi_label, skip_header, delimiter, **kwargs)
-        self.tokenizer: FullTokenizer = None
+        self.tokenizer: PreTrainedTokenizer = None
 
     def inputs_to_samples(self, inputs, gold=False):
         tokenizer = self.tokenizer
@@ -50,11 +49,11 @@ class TransformerTextTransform(TableTransform):
             attention_mask = [1] * len(token_ids)
             diff = max_length - len(token_ids)
             if diff < 0:
-                logger.warning(
-                    f'Input tokens {tokens} exceed the max sequence length of {max_length - 2}. '
-                    f'The exceeded part will be truncated and ignored. '
-                    f'You are recommended to split your long text into several sentences within '
-                    f'{max_length - 2} tokens beforehand.')
+                # logger.warning(
+                #     f'Input tokens {tokens} exceed the max sequence length of {max_length - 2}. '
+                #     f'The exceeded part will be truncated and ignored. '
+                #     f'You are recommended to split your long text into several sentences within '
+                #     f'{max_length - 2} tokens beforehand.')
                 token_ids = token_ids[:max_length]
                 attention_mask = attention_mask[:max_length]
                 segment_ids = segment_ids[:max_length]
@@ -75,7 +74,7 @@ class TransformerTextTransform(TableTransform):
     def create_types_shapes_values(self) -> Tuple[Tuple, Tuple, Tuple]:
         max_length = self.config.max_length
         types = (tf.int32, tf.int32, tf.int32), tf.string
-        shapes = ([max_length], [max_length], [max_length]), [None, ] if self.config.multi_label else []
+        shapes = ([max_length], [max_length], [max_length]), [None, ] if self.config.get('multi_label', None) else []
         values = (0, 0, 0), self.label_vocab.safe_pad_token
         return types, shapes, values
 
@@ -84,7 +83,7 @@ class TransformerTextTransform(TableTransform):
         exit(1)
 
     def y_to_idx(self, y) -> tf.Tensor:
-        if self.config.multi_label:
+        if self.config.get('multi_label', None):
             # need to change index to binary vector
             mapped = tf.map_fn(fn=lambda x: tf.cast(self.label_vocab.lookup(x), tf.int32), elems=y,
                                fn_output_signature=tf.TensorSpec(dtype=tf.dtypes.int32, shape=[None, ]))
@@ -97,7 +96,7 @@ class TransformerTextTransform(TableTransform):
     def Y_to_outputs(self, Y: Union[tf.Tensor, Tuple[tf.Tensor]], gold=False, inputs=None, X=None,
                      batch=None) -> Iterable:
         # Prediction to be Y > 0:
-        if self.config.multi_label:
+        if self.config.get('multi_label', None):
             preds = Y
         else:
             preds = tf.argmax(Y, axis=-1)
@@ -149,7 +148,7 @@ class TransformerClassifierTF(KerasComponent):
         if loss:
             assert isinstance(loss, tf.keras.losses.loss), 'Must specify loss as an instance in tf.keras.losses'
             return loss
-        elif self.config.multi_label:
+        elif self.config.get('multi_label', None):
             # Loss to be BinaryCrossentropy for multi-label:
             loss = tf.keras.losses.BinaryCrossentropy(from_logits=True)
         else:
@@ -187,7 +186,7 @@ class TransformerClassifierTF(KerasComponent):
         return train_examples
 
     def build_metrics(self, metrics, logger, **kwargs):
-        if self.config.multi_label:
+        if self.config.get('multi_label', None):
             metric = tf.keras.metrics.BinaryAccuracy('binary_accuracy')
         else:
             metric = tf.keras.metrics.SparseCategoricalAccuracy('accuracy')

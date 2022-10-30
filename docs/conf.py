@@ -1,7 +1,7 @@
 # -- Project information -----------------------------------------------------
-import os
 import sys
 import os
+from datetime import datetime
 
 sys.path.append(os.path.abspath('..'))
 sys.path.append(os.path.abspath('../plugins/hanlp_common'))
@@ -10,7 +10,7 @@ sys.path.append(os.path.abspath('../plugins/hanlp_restful'))
 import hanlp
 
 project = 'HanLP'
-copyright = '2020, hankcs'
+copyright = f'2020-{datetime.now().year}, hankcs'
 author = 'hankcs'
 
 # The short X.Y version.
@@ -74,23 +74,23 @@ panels_add_bootstrap_css = False
 # a list of builtin themes.
 #
 html_theme = "sphinx_book_theme"
-html_title = "HanLP documentation"
+html_title = "HanLP Documentation"
 html_logo = "_static/logo.png"
 html_favicon = "_static/favicon.png"
 html_copy_source = True
 html_sourcelink_suffix = ""
 
 html_sidebars = {
-    "reference/blog/*": [
-        "sidebar-search-bs.html",
-        "postcard.html",
-        "recentposts.html",
-        "tagcloud.html",
-        "categories.html",
-        "archives.html",
-        "sbt-sidebar-nav.html",
-        "sbt-sidebar-footer.html",
-    ]
+    # "reference/blog/*": [
+    #     "sidebar-search-bs.html",
+    #     "postcard.html",
+    #     "recentposts.html",
+    #     "tagcloud.html",
+    #     "categories.html",
+    #     "archives.html",
+    #     "sbt-sidebar-nav.html",
+    #     "sbt-sidebar-footer.html",
+    # ]
 }
 # Add any paths that contain custom static files (such as style sheets) here,
 # relative to this directory. They are copied after the builtin static files,
@@ -103,7 +103,7 @@ thebe_config = {
 }
 
 html_theme_options = {
-    "theme_dev_mode": True,
+    "theme_dev_mode": False,
     "path_to_docs": "docs",
     "repository_url": "https://github.com/hankcs/HanLP",
     # "repository_branch": "gh-pages",  # For testing
@@ -124,12 +124,12 @@ html_theme_options = {
     # "extra_footer": "<a href='https://google.com'>Test</a>",  # DEPRECATED KEY
     # "extra_navbar": "<a href='https://google.com'>Test</a>",
 }
-html_baseurl = "https://sphinx-book-theme.readthedocs.io/en/latest/"
+html_baseurl = "https://hanlp.hankcs.com/docs/"
 
 # -- ABlog config -------------------------------------------------
 blog_path = "reference/blog"
 blog_post_pattern = "reference/blog/*.md"
-blog_baseurl = "https://sphinx-book-theme.readthedocs.io"
+blog_baseurl = "https://hanlp.hankcs.com/docs/"
 fontawesome_included = True
 post_auto_image = 1
 post_auto_excerpt = 2

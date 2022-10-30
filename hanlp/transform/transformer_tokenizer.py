@@ -6,7 +6,7 @@ from typing import Union, Optional
 
 from hanlp_common.constant import BOS, EOS
 from hanlp_common.structure import SerializableDict
-from hanlp.layers.transformers.pt_imports import PreTrainedTokenizer, PretrainedConfig, AutoTokenizer
+from hanlp.layers.transformers.pt_imports import PreTrainedTokenizer, PretrainedConfig, AutoTokenizer_
 from hanlp_trie import DictInterface
 
 
@@ -60,7 +60,7 @@ class TransformerTextTokenizer(TransformerTokenizer):
             output_key = [f'{output_key}_{key}' for key in self._KEY]
         self.output_key = output_key
         if isinstance(tokenizer, str):
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer)
+            tokenizer = AutoTokenizer_.from_pretrained(tokenizer)
         self.tokenizer = tokenizer
 
     def __call__(self, sample: dict):
@@ -68,11 +68,13 @@ class TransformerTextTokenizer(TransformerTokenizer):
         text_b = sample[self.text_b] if self.text_b else None
         max_seq_length = self.max_seq_length if self.truncate_long_sequences else None
         encoding = self.tokenizer.encode_plus(text_a, text_b, max_length=max_seq_length)
-        input_ids = encoding.data['input_ids']
-        if not self.truncate_long_sequences and len(input_ids) > self.max_seq_length:
-            input_ids = self.sliding_window(input_ids)
-            encoding.data['input_ids'] = input_ids  # TODO: other fields should be properly handled too
-        for k, v in zip(self.output_key, [encoding.data[_] for _ in self._KEY]):
+        results = dict((k, encoding.data.get(k, None)) for k in self._KEY)
+        if not self.truncate_long_sequences and len(results['input_ids']) > self.max_seq_length:
+            # TODO: other fields should be properly handled too
+            results['input_ids'] = self.sliding_window(results['input_ids'])
+        if not results['token_type_ids']:
+            results['token_type_ids'] = encoding[0].type_ids
+        for k, v in zip(self.output_key, [results[_] for _ in self._KEY]):
             sample[k] = v
         return sample
 
@@ -162,7 +164,8 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
             # ['▁lo', 'ving'], tokenize 商品 into ['▁', '商品']. For the later case, the prefix '▁' has to be removed
             # as there is no space between some languages like Chinese
             check_space_before = tokenizer_name in ('xlm-roberta-base', 'xlm-roberta-large', 'google/mt5-small',
-                                                    'google/mt5-base')
+                                                    'google/mt5-base', 'xlm-roberta-base-no-space',
+                                                    'mMiniLMv2L6-no-space', 'mMiniLMv2L12-no-space')
         self.check_space_before = check_space_before
         self.ret_subtokens_group = ret_subtokens_group
         self.ret_subtokens = ret_subtokens
@@ -195,7 +198,8 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
             cls_token_at_end = xlnet
             pad_on_left = xlnet
         if isinstance(tokenizer, str):
-            tokenizer = AutoTokenizer.from_pretrained(tokenizer, use_fast=use_fast, do_basic_tokenize=do_basic_tokenize)
+            tokenizer = AutoTokenizer_.from_pretrained(tokenizer, use_fast=use_fast,
+                                                       do_basic_tokenize=do_basic_tokenize)
         if use_fast:
             # Dirty fix upstream bug: https://github.com/hankcs/HanLP/issues/1602
             if hasattr(tokenizer, '_tokenizer') and hasattr(tokenizer._tokenizer, 'no_truncation'):
@@ -229,11 +233,11 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
         if self.ret_token_span or not self.truncate_long_sequences:
             assert not self.cls_token_at_end
             assert not self.pad_on_left
-        if self.ret_subtokens:
-            if not use_fast:
-                raise NotImplementedError(
-                    'ret_subtokens is not available when using Python tokenizers. '
-                    'To use this feature, set use_fast = True.')
+        # if self.ret_subtokens:
+        #     if not use_fast:
+        #         raise NotImplementedError(
+        #             'ret_subtokens is not available when using Python tokenizers. '
+        #             'To use this feature, set use_fast = True.')
         self.dict: Optional[DictInterface] = dict_force  # For tokenization of raw text
         self.strip_cls_sep = strip_cls_sep
 
@@ -251,16 +255,53 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
                                                      return_offsets_mapping=True,
                                                      add_special_tokens=add_special_tokens).encodings[0]
                     subtoken_offsets = encoding.offsets
-                    if add_special_tokens:
-                        subtoken_offsets = subtoken_offsets[1 if self.has_cls else 0:-1]
                     input_tokens = encoding.tokens
                     input_ids = encoding.ids
+
+                    # Fill up missing non-blank characters swallowed by HF tokenizer
+                    offset = 0
+                    fixed_offsets = []
+                    fixed_tokens = []
+                    fixed_ids = []
+                    for token, id, (b, e) in zip(input_tokens, input_ids, subtoken_offsets):
+                        if b > offset:
+                            missing_token = input_str[offset: b]
+                            if not missing_token.isspace():  # In the future, we may want space back
+                                fixed_tokens.append(missing_token)
+                                fixed_ids.append(tokenizer.unk_token_id)
+                                fixed_offsets.append((offset, b))
+                        if e == offset:  # LI™ -> LIT + M
+                            if fixed_offsets and fixed_offsets[-1][0] < b:
+                                fixed_offsets[-1] = (fixed_offsets[-1][0], b)
+
+                        fixed_tokens.append(token)
+                        fixed_ids.append(id)
+                        fixed_offsets.append((b, e))
+                        offset = e
+                    subtoken_offsets = fixed_offsets
+                    input_tokens = fixed_tokens
+                    input_ids = fixed_ids
+
+                    if add_special_tokens:
+                        subtoken_offsets = subtoken_offsets[1 if self.has_cls else 0:-1]
+
+                    # Edge case that the input_str is swallowed in whole
+                    if input_str and not subtoken_offsets and not input_str.isspace():
+                        __index = 1 if add_special_tokens and self.has_cls else 0
+                        input_tokens.insert(__index, input_str)
+                        input_ids.insert(__index, tokenizer.unk_token_id)
+                        subtoken_offsets.append((0, len(input_str)))
+
                     if not self.has_cls:
                         input_tokens = [self.cls_token] + input_tokens
                         input_ids = [self.cls_token_id] + input_ids
                 else:
                     input_tokens = tokenizer.tokenize(input_str)
-                    subtoken_offsets = input_tokens
+                    subtoken_offsets = []
+                    _o = 0
+                    for each in input_tokens:
+                        subtoken_offsets.append((_o, _o + len(each)))
+                        _o += len(each)
                     if add_special_tokens:
                         input_tokens = [self.cls_token] + input_tokens + [self.sep_token]
                     input_ids = tokenizer.convert_tokens_to_ids(input_tokens)
@@ -275,20 +316,38 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
                         subtoken_offsets = [subtoken_offsets[i - 1] for i in non_blank_offsets]
                     else:
                         subtoken_offsets = [subtoken_offsets[i] for i in non_blank_offsets]
+                    # MT5 generates tokens like ▁of, which is bad for the tokenizer. So we want to remove the prefix.
+                    for i, token in enumerate(input_tokens[1:-1] if add_special_tokens else input_tokens):
+                        if input_str[subtoken_offsets[i][0]] == ' ':
+                            subtoken_offsets[i] = (subtoken_offsets[i][0] + 1, subtoken_offsets[i][1])
+                # The following block will tokenize each empty string (space) into an unk token
+                # if add_special_tokens:
+                #     if len(input_tokens) == 2:  # bos and eos, meaning that the text contains only some spaces
+                #         input_tokens.insert(1, input_str)
+                #         input_ids.insert(1, tokenizer.unk_token_id)
+                #         subtoken_offsets.append((0, len(input_str)))
+                # else:
+                #     if not input_ids:  # This chunk might be some control chars getting removed by tokenizer
+                #         input_tokens = [input_str]
+                #         input_ids = [tokenizer.unk_token_id]
+                #         subtoken_offsets = [(0, len(input_str))]
                 return input_tokens, input_ids, subtoken_offsets
 
             if self.dict:
-                chunks = self.dict.split(input_tokens)
+                chunks = self.dict.split(sample.get(f'{self.input_key}_', input_tokens))  # Match original text directly
                 _input_tokens, _input_ids, _subtoken_offsets = [self.cls_token], [self.cls_token_id], []
                 _offset = 0
                 custom_words = sample['custom_words'] = []
+                char_offset = 0
                 for chunk in chunks:
-                    if isinstance(chunk, str):
+                    if isinstance(chunk, str):  # Use transformed text as it's what models are trained on
+                        chunk = input_tokens[char_offset:char_offset + len(chunk)]
                         tokens, ids, offsets = tokenize_str(chunk, add_special_tokens=False)
+                        char_offset += len(chunk)
                     else:
                         begin, end, label = chunk
-                        # chunk offset is in char level
-                        # custom_words.append(chunk)
+                        _offset = begin
+                        # chunk offset is on char level, at this moment, there is no concept of tokens, just subtokens
                         if isinstance(label, list):
                             tokens, ids, offsets, delta = [], [], [], 0
                             for token in label:
@@ -304,6 +363,7 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
                             tokens, ids, offsets = tokenize_str(input_tokens[begin:end], add_special_tokens=False)
                             # offsets = [(offsets[0][0], offsets[-1][-1])]
                             custom_words.append((len(_input_ids) - 1, len(_input_ids) + len(ids) - 1, label))
+                        char_offset = end
                     _input_tokens.extend(tokens)
                     _input_ids.extend(ids)
                     _subtoken_offsets.extend((x[0] + _offset, x[1] + _offset) for x in offsets)
@@ -336,17 +396,32 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
                     return_offsets_mapping = tokenizer.is_fast and self.ret_subtokens
                     encodings = tokenizer.batch_encode_plus(
                         input_tokens,
-                        return_offsets_mapping=return_offsets_mapping,
+                        return_offsets_mapping=return_offsets_mapping,  # Many tokenizers do not offer fast version
                         add_special_tokens=False
                     )
+                    subtoken_ids_per_token = encodings.data['input_ids']
                     if return_offsets_mapping:
                         offsets_mapping = [encoding.offsets for encoding in encodings.encodings]
                     else:
-                        offsets_mapping = [None for encoding in encodings.encodings]
+                        offsets_mapping = []
+                        for token, subtoken_ids in zip(input_tokens, subtoken_ids_per_token):
+                            if len(subtoken_ids) > len(token):  # … --> ...
+                                del subtoken_ids[len(token):]
+                            if not subtoken_ids:
+                                subtoken_ids = [tokenizer.unk_token_id]
+                            # Since non-fast tok generates no mapping, we have to guess
+                            char_per_subtoken = max(len(token) // len(subtoken_ids), 1)
+                            bes = [(b, b + char_per_subtoken) for b in range(0, len(token), char_per_subtoken)]
+                            if not bes:  # the token is an empty string
+                                bes = [(0, 0)]
+                            if len(bes) != len(subtoken_ids):
+                                bes[len(subtoken_ids) - 1] = (bes[len(subtoken_ids) - 1][0], len(token))
+                                del bes[len(subtoken_ids):]
+                            offsets_mapping.append(bes)
                 else:
                     encodings = SerializableDict()
-                    encodings.data = {'input_ids': []}
-                subtoken_ids_per_token = encodings.data['input_ids']
+                    subtoken_ids_per_token = []
+                    encodings.data = {'input_ids': subtoken_ids_per_token}
                 if self.check_space_before:
                     # noinspection PyUnboundLocalVariable
                     for token, subtokens, mapping, encoding in zip(input_tokens, subtoken_ids_per_token,
@@ -392,7 +467,8 @@ class TransformerSequenceTokenizer(TransformerTokenizer):
                             subtoken_offsets.append([(0, len(token))])
                     if self.ret_subtokens_group:
                         sample[f'{self.input_key}_subtoken_offsets_group'] = subtoken_offsets
-                    sample[f'{self.input_key}_subtoken_offsets'] = sum(subtoken_offsets, [])
+                    else:
+                        sample[f'{self.input_key}_subtoken_offsets'] = sum(subtoken_offsets, [])
         else:
             input_ids, attention_mask, token_type_ids, prefix_mask = \
                 convert_examples_to_features(input_tokens,
@@ -619,7 +695,7 @@ def convert_examples_to_features(
 
 def main():
     transformer = 'bert-base-uncased'
-    tokenizer: PreTrainedTokenizer = AutoTokenizer.from_pretrained(transformer)
+    tokenizer: PreTrainedTokenizer = AutoTokenizer_.from_pretrained(transformer)
     # _test_text_transform(tokenizer)
     _test_sequence_transform(tokenizer)
 

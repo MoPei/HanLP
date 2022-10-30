@@ -123,7 +123,7 @@ class TorchComponent(Component, ABC):
         for k, v in self.config.items():
             if isinstance(v, dict) and 'classpath' in v:
                 self.config[k] = Configurable.from_config(v)
-        self.on_config_ready(**self.config)
+        self.on_config_ready(**self.config, save_dir=save_dir)
 
     def save_vocabs(self, save_dir, filename='vocabs.json'):
         """Save vocabularies to a directory.
@@ -174,13 +174,13 @@ class TorchComponent(Component, ABC):
         self.load_vocabs(save_dir)
         if verbose:
             flash('Building model [blink][yellow]...[/yellow][/blink]')
+        self.config.pop('training', None)  # Some legacy versions accidentally put training into config file
         self.model = self.build_model(
-            **merge_dict(self.config, training=False, **kwargs, overwrite=True,
-                         inplace=True))
+            **merge_dict(self.config, **kwargs, overwrite=True, inplace=True), training=False, save_dir=save_dir)
         if verbose:
             flash('')
         self.load_weights(save_dir, **kwargs)
-        self.to(devices)
+        self.to(devices, verbose=verbose)
         self.model.eval()
 
     def fit(self,
@@ -224,7 +224,7 @@ class TorchComponent(Component, ABC):
         config = self._capture_config(locals())
         if not logger:
             logger = self.build_logger('train', save_dir)
-        if not seed:
+        if seed is None:
             self.config.seed = 233 if isdebugging() else int(time.time())
         set_seed(self.config.seed)
         logger.info(self._savable_config.to_json(sort=True))
@@ -251,7 +251,7 @@ class TorchComponent(Component, ABC):
             logger.info(
                 f'Finetune model loaded with {sum(p.numel() for p in self.model.parameters() if p.requires_grad)}'
                 f'/{sum(p.numel() for p in self.model.parameters())} trainable/total parameters.')
-        self.on_config_ready(**self.config)
+        self.on_config_ready(**self.config, save_dir=save_dir)
         trn = self.build_dataloader(**merge_dict(config, data=trn_data, batch_size=batch_size, shuffle=True,
                                                  training=True, device=first_device, logger=logger, vocabs=self.vocabs,
                                                  overwrite=True))
@@ -276,8 +276,10 @@ class TorchComponent(Component, ABC):
         criterion = self.build_criterion(**merge_dict(config, trn=trn))
         optimizer = self.build_optimizer(**merge_dict(config, trn=trn, criterion=criterion))
         metric = self.build_metric(**self.config)
-        if hasattr(trn.dataset, '__len__') and dev and hasattr(dev.dataset, '__len__'):
-            logger.info(f'{len(trn.dataset)}/{len(dev.dataset)} samples in trn/dev set.')
+        if hasattr(trn, 'dataset') and dev and hasattr(dev, 'dataset'):
+            if trn.dataset and dev.dataset:
+                logger.info(f'{len(trn.dataset)}/{len(dev.dataset)} samples in trn/dev set.')
+        if hasattr(trn, '__len__') and dev and hasattr(dev, '__len__'):
             trn_size = len(trn) // self.config.get('gradient_accumulation', 1)
             ratio_width = len(f'{trn_size}/{trn_size}')
         else:
@@ -321,11 +323,12 @@ class TorchComponent(Component, ABC):
         """
         pass
 
-    def build_vocabs(self, **kwargs):
+    def build_vocabs(self, trn: torch.utils.data.Dataset, logger: logging.Logger):
         """Override this method to build vocabs.
 
         Args:
-            **kwargs: The subclass decides the method signature.
+            trn: Training set.
+            logger: Logger for reporting progress.
         """
         pass
 
@@ -359,11 +362,10 @@ class TorchComponent(Component, ABC):
         pass
 
     @abstractmethod
-    def build_criterion(self, decoder, **kwargs):
+    def build_criterion(self, **kwargs):
         """Implement this method to build criterion (loss function).
 
         Args:
-            decoder: The model or decoder.
             **kwargs: The subclass decides the method signature.
         """
         pass
@@ -504,7 +506,7 @@ class TorchComponent(Component, ABC):
         return output
 
     def to(self,
-           devices=Union[int, float, List[int], Dict[str, Union[int, torch.device]]],
+           devices: Union[int, float, List[int], Dict[str, Union[int, torch.device]]] = None,
            logger: logging.Logger = None, verbose=HANLP_VERBOSE):
         """Move this component to devices.
 
@@ -513,9 +515,14 @@ class TorchComponent(Component, ABC):
             logger: Logger for printing progress report, as copying a model from CPU to GPU can takes several seconds.
             verbose: ``True`` to print progress when logger is None.
         """
-        if devices == -1 or devices == [-1]:
+        if devices is None:
+            # if getattr(torch, 'has_mps', None):  # mac M1 chips
+            #     devices = torch.device('mps:0')
+            # else:
+            devices = cuda_devices(devices)
+        elif devices == -1 or devices == [-1]:
             devices = []
-        elif isinstance(devices, (int, float)) or devices is None:
+        elif isinstance(devices, (int, float)):
             devices = cuda_devices(devices)
         if devices:
             if logger:
@@ -544,13 +551,17 @@ class TorchComponent(Component, ABC):
                             flash(f'Moving module [yellow]{name}[/yellow] to [on_yellow][magenta][bold]{device}'
                                   f'[/bold][/magenta][/on_yellow]: [red]{regex}[/red]\n')
                             module.to(device)
+            elif isinstance(devices, torch.device):
+                if verbose:
+                    flash(f'Moving model to {devices} [blink][yellow]...[/yellow][/blink]')
+                self.model = self.model.to(devices)
             else:
                 raise ValueError(f'Unrecognized devices {devices}')
             if verbose:
                 flash('')
         else:
             if logger:
-                logger.info('Using CPU')
+                logger.info('Using [red]CPU[/red]')
 
     def parallelize(self, devices: List[Union[int, torch.device]]):
         return nn.DataParallel(self.model, device_ids=devices)
@@ -577,7 +588,7 @@ class TorchComponent(Component, ABC):
         return devices[0]
 
     def on_config_ready(self, **kwargs):
-        """Called when config is ready, either during ``fit`` ot ``load``. Subclass can perform extra initialization
+        """Called when config is ready, either during ``fit`` or ``load``. Subclass can perform extra initialization
         tasks in this callback.
 
         Args:
@@ -599,13 +610,12 @@ class TorchComponent(Component, ABC):
 
     # noinspection PyMethodOverriding
     @abstractmethod
-    def predict(self, data: Union[str, List[str]], batch_size: int = None, **kwargs):
+    def predict(self, *args, **kwargs):
         """Predict on data fed by user. Users shall avoid directly call this method since it is not guarded with
         ``torch.no_grad`` and will introduces unnecessary gradient computation. Use ``__call__`` instead.
 
         Args:
-            data: Sentences or tokens.
-            batch_size: Decoding batch size.
+            *args: Sentences or tokens.
             **kwargs: Used in sub-classes.
         """
         pass
@@ -617,15 +627,12 @@ class TorchComponent(Component, ABC):
         return torch.zeros(16, 16, device=device)
 
     @torch.no_grad()
-    def __call__(self, data, batch_size=None, **kwargs):
+    def __call__(self, *args, **kwargs):
         """Predict on data fed by user. This method calls :meth:`~hanlp.common.torch_component.predict` but decorates
         it with ``torch.no_grad``.
 
         Args:
-            data: Sentences or tokens.
-            batch_size: Decoding batch size.
+            *args: Sentences or tokens.
             **kwargs: Used in sub-classes.
         """
-        return super().__call__(data, **merge_dict(self.config, overwrite=True,
-                                                   batch_size=batch_size or self.config.get('batch_size', None),
-                                                   **kwargs))
+        return super().__call__(*args, **merge_dict(self.config, overwrite=True, **kwargs))
