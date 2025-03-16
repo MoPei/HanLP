@@ -13,7 +13,7 @@ try:
     import requests
 
 
-    def _post(url, form: Dict[str, Any], headers: Dict[str, Any], timeout=10, verify=True) -> str:
+    def _post(url, form: Dict[str, Any], headers: Dict[str, Any], timeout=60, verify=True) -> str:
         response = requests.post(url, json=form, headers=headers, timeout=timeout, verify=verify)
         if response.status_code != 200:
             raise HTTPError(url, response.status_code, response.text, response.headers, None)
@@ -22,7 +22,7 @@ except ImportError:
     import ssl
 
 
-    def _post(url, form: Dict[str, Any], headers: Dict[str, Any], timeout=10, verify=True) -> str:
+    def _post(url, form: Dict[str, Any], headers: Dict[str, Any], timeout=60, verify=True) -> str:
         request = Request(url, json.dumps(form).encode())
         for k, v in headers.items():
             request.add_header(k, v)
@@ -36,7 +36,7 @@ except ImportError:
 
 class HanLPClient(object):
 
-    def __init__(self, url: str, auth: str = None, language=None, timeout=10, verify=True) -> None:
+    def __init__(self, url: str, auth: str = None, language=None, timeout=60, verify=True) -> None:
         """
 
         Args:
@@ -44,8 +44,8 @@ class HanLPClient(object):
             auth (str): An auth key licenced from a service provider.
             language (str): The default language for each :func:`~hanlp_restful.HanLPClient.parse` call.
                 Contact the service provider for the list of languages supported.
-                Conventionally, ``zh`` is used for Chinese and ``mul`` for multilingual.
-                Leave ``None`` to use the default language on server.
+                Conventionally, ``zh`` is used for Chinese, ``en`` for English, ``ja`` for Japanese and ``mul`` for
+                multilingual. Leave ``None`` to use the default language on server.
             timeout (int): Maximum waiting time in seconds for a request.
             verify (bool): ``True`` to enable SSL cert verification. You can also pass ``verify`` the path to a CA_BUNDLE
                 file or directory with certificates of trusted CAs (``requests`` required).
@@ -279,7 +279,7 @@ class HanLPClient(object):
 
         Args:
             text: A document (``str``), or a list of sentences (``List[str]``).
-            coarse: Whether to perform coarse-grained or fine-grained tokenization.
+            coarse: Whether to perform coarse-grained or fine-grained tokenization. Chinese and Japanese supported.
             language: The language of input text. ``None`` to use the default language.
 
         Returns:
@@ -322,8 +322,8 @@ class HanLPClient(object):
               '多', '语种', 'NLP', '技术', '。']]
         """
         language = language or self._language
-        if coarse and language and language != 'zh':
-            raise NotImplementedError(f'Coarse tokenization not supported for {language}. Please set language="zh".')
+        if coarse and language and language not in {'zh', 'ja'}:
+            raise NotImplementedError(f'Coarse tokenization not supported for {language}. Please set language="zh" or "ja".')
         doc = self.parse(text=text, tasks='tok/coarse' if coarse is True else 'tok', language=language)
         return next(iter(doc.values()))
 
@@ -440,6 +440,38 @@ class HanLPClient(object):
             'topk': topk,
         })
 
+    def abstractive_summarization(
+            self,
+            text: str,
+            language: str = None,
+    ) -> str:
+        r""" Abstractive Summarization is the task of generating a short and concise summary that captures the
+        salient ideas of the source text. The generated summaries potentially contain new phrases and sentences that
+        may not appear in the source text.
+
+        Args:
+            text: The text content of the document.
+            language: The language of input text or tokens. ``None`` to use the default language on server.
+
+        Returns:
+            Summarization.
+
+        Examples::
+
+            HanLP.abstractive_summarization('''
+            每经AI快讯，2月4日，长江证券研究所金属行业首席分析师王鹤涛表示，2023年海外经济衰退，美债现处于历史高位，
+            黄金的趋势是值得关注的；在国内需求修复的过程中，看好大金属品种中的铜铝钢。
+            此外，在细分的小品种里，建议关注两条主线，一是新能源，比如锂、钴、镍、稀土，二是专精特新主线。（央视财经）
+            ''')
+            # Output:
+            '长江证券：看好大金属品种中的铜铝钢'
+        """
+        assert text, 'Text has to be non-empty.'
+        return self._send_post_json(self._url + '/abstractive_summarization', {
+            'text': text,
+            'language': language or self._language,
+        })
+
     def grammatical_error_correction(self, text: Union[str, List[str]], language: str = None) \
             -> Union[str, List[str]]:
         """ Grammatical Error Correction (GEC) is the task of correcting different kinds of errors in text such as
@@ -489,10 +521,39 @@ class HanLPClient(object):
                                         {'text': text, 'model': model, 'topk': topk, 'prob': prob})
         return response
 
+    def sentiment_analysis(self, text: Union[str, List[str]], language=None) -> Union[float, List[float]]:
+        r"""
+        Sentiment analysis is the task of classifying the polarity of a given text. For instance,
+        a text-based tweet can be categorized into either "positive", "negative", or "neutral".
+
+        Args:
+            text: A document or a list of documents.
+            language (str): The default language for each :func:`~hanlp_restful.HanLPClient.parse` call.
+                Contact the service provider for the list of languages supported.
+                Conventionally, ``zh`` is used for Chinese and ``mul`` for multilingual.
+                Leave ``None`` to use the default language on server.
+
+        Returns:
+
+            Sentiment polarity as a numerical value which measures how positive the sentiment is.
+
+        Examples::
+
+            HanLP.language_identification('''“这是一部男人必看的电影。”人人都这么说。但单纯从性别区分，就会让这电影变狭隘。
+            《肖申克的救赎》突破了男人电影的局限，通篇几乎充满令人难以置信的温馨基调，而电影里最伟大的主题是“希望”。
+            当我们无奈地遇到了如同肖申克一般囚禁了心灵自由的那种囹圄，我们是无奈的老布鲁克，灰心的瑞德，还是智慧的安迪？
+            运用智慧，信任希望，并且勇敢面对恐惧心理，去打败它？
+            经典的电影之所以经典，因为他们都在做同一件事——让你从不同的角度来欣赏希望的美好。''')
+            0.9505730271339417
+        """
+        response = self._send_post_json(self._url + '/sentiment_analysis',
+                                        {'text': text, 'language': language or self._language})
+        return response
+
     def language_identification(self, text: Union[str, List[str]], topk=False, prob=False) -> Union[
         str, Dict[str, float], List[Union[str, Dict[str, float]]]]:
         """
-        Recognize the language of a given text.
+        Identify the language of a given text.
 
         Args:
             text: A document or a list of documents.
@@ -505,13 +566,17 @@ class HanLPClient(object):
 
         Examples::
 
-            lid('In 2021, HanLPv2.1 delivers state-of-the-art multilingual NLP techniques to production environments.')
+            HanLP.language_identification(
+            'In 2021, HanLPv2.1 delivers state-of-the-art multilingual NLP techniques.')
             'en'
-            lang, prob = lid('2021年、HanLPv2.1は次世代の最先端多言語NLP技術を本番環境に導入します。', prob=True)
+            lang, prob = HanLP.language_identification(
+            '2021年、HanLPv2.1は次世代の最先端多言語NLP技術を本番環境に導入します。', prob=True)
             ('ja', 0.9976244568824768)
-            lid('2021年 HanLPv2.1为生产环境带来次世代最先进的多语种NLP技术。', topk=2)
+            HanLP.language_identification(
+            '2021年 HanLPv2.1为生产环境带来次世代最先进的多语种NLP技术。', topk=2)
             ['zh', 'ja']
-            lid('2021年 HanLPv2.1为生产环境带来次世代最先进的多语种NLP技术。', topk=2, prob=True)
+            HanLP.language_identification(
+            '2021年 HanLPv2.1为生产环境带来次世代最先进的多语种NLP技术。', topk=3, prob=True)
             {'zh': 0.3952908217906952, 'en': 0.37189167737960815, 'ja': 0.056213412433862686}
 
         .. _ISO 639-1 codes:

@@ -16,12 +16,44 @@ from hanlp_common.visualization import tree_to_list, list_to_tree, render_labele
 
 class Document(dict):
     def __init__(self, *args, **kwargs) -> None:
-        """
-        A dict structure holding parsed annotations.
+        r"""A dict structure holding parsed annotations. A document is a subclass of ``dict`` and it supports every
+        interface of ``dict``\. Additionally, it supports interfaces to deal with various linguistic structures. Its
+        ``str`` and ``dict`` representations are made to be compatible with JSON serialization.
 
         Args:
             *args: An iterator of key-value pairs.
             **kwargs: Arguments from ``**`` operator.
+
+        Examples::
+
+            # Create a document
+            doc = Document(
+                tok=[["晓美焰", "来到", "北京", "立方庭", "参观", "自然", "语义", "科技", "公司"]],
+                pos=[["NR", "VV", "NR", "NR", "VV", "NN", "NN", "NN", "NN"]],
+                ner=[[["晓美焰", "PERSON", 0, 1], ["北京立方庭", "LOCATION", 2, 4],
+                      ["自然语义科技公司", "ORGANIZATION", 5, 9]]],
+                dep=[[[2, "nsubj"], [0, "root"], [4, "name"], [2, "dobj"], [2, "conj"],
+                      [9, "compound"], [9, "compound"], [9, "compound"], [5, "dobj"]]]
+            )
+
+            # print(doc) or str(doc) to get its JSON representation
+            print(doc)
+
+            # Access an annotation by its task name
+            print(doc['tok'])
+
+            # Get number of sentences
+            print(f'It has {doc.count_sentences()} sentence(s)')
+
+            # Access the n-th sentence
+            print(doc.squeeze(0)['tok'])
+
+            # Pretty print it right in your console or notebook
+            doc.pretty_print()
+
+            # To save the pretty prints in a str
+            pretty_text: str = '\n\n'.join(doc.to_pretty())
+
         """
         super().__init__(*args, **kwargs)
         for k, v in list(self.items()):
@@ -77,7 +109,7 @@ class Document(dict):
         """
         d = dict(self)
         for k, v in self.items():
-            if not v:
+            if v == [] or v is None:
                 continue
             if k == 'con':
                 if not isinstance(v, Tree) and not isinstance(v[0], Tree):
@@ -97,7 +129,7 @@ class Document(dict):
     def __str__(self) -> str:
         return self.to_json()
 
-    def to_conll(self, tok='tok', lem='lem', pos='pos', dep='dep', sdp='sdp') -> Union[
+    def to_conll(self, tok='tok', lem='lem', pos='pos', xpos='pos/xpos', fea='fea', dep='dep', sdp='sdp') -> Union[
         CoNLLSentence, List[CoNLLSentence]]:
         """
         Convert to :class:`~hanlp_common.conll.CoNLLSentence`.
@@ -105,7 +137,9 @@ class Document(dict):
         Args:
             tok (str): Field name for tok.
             lem (str): Field name for lem.
-            pos (str): Filed name for upos.
+            pos (str): Field name for upos.
+            xpos (str): Field name for xpos.
+            fea (str): Field name for feats.
             dep (str): Field name for dependency parsing.
             sdp (str): Field name for semantic dependency parsing.
 
@@ -116,6 +150,8 @@ class Document(dict):
         tok = prefix_match(tok, self)
         lem = prefix_match(lem, self)
         pos = prefix_match(pos, self)
+        xpos = prefix_match(xpos, self)
+        fea = prefix_match(fea, self)
         dep = prefix_match(dep, self)
         sdp = prefix_match(sdp, self)
         results = CoNLLSentenceList()
@@ -141,7 +177,8 @@ class Document(dict):
                 if not _dep:
                     _dep = (None, None)
                 sent.append(
-                    CoNLLUWord(i + 1, form=_tok, lemma=get(lem, i), upos=get(pos, i), head=_dep[0], deprel=_dep[1],
+                    CoNLLUWord(i + 1, form=_tok, lemma=get(lem, i), upos=get(pos, i), xpos=get(xpos, i),
+                               feats=get(fea, i), head=_dep[0], deprel=_dep[1],
                                deps=None if not get(sdp, i) else '|'.join(f'{x[0]}:{x[1]}' for x in get(sdp, i))))
             results.append(sent)
         if flat:
@@ -173,7 +210,7 @@ class Document(dict):
         tok = prefix_match(tok, self)
         pos = prefix_match(pos, self)
         ner = prefix_match(ner, self)
-        conlls = self.to_conll(tok, lem, pos, dep, sdp)
+        conlls = self.to_conll(tok=tok, lem=lem, pos=pos, dep=dep, sdp=sdp)
         flat = isinstance(conlls, CoNLLSentence)
         if flat:
             conlls: List[CoNLLSentence] = [conlls]
@@ -321,13 +358,14 @@ class Document(dict):
                         row[1] = row[1].replace('  ─', ' ──')
                     row[1] = row[1].replace('─ ─', '───')
                     row[1] = re.sub(r'([►─])([\w-]*)(\s+)([│├])', lambda
-                        m: f'{m.group(1)}{m.group(2)}{"─" * len(m.group(3))}{"┤" if m.group(4) == "│" else "┼"}', row[1])
+                        m: f'{m.group(1)}{m.group(2)}{"─" * len(m.group(3))}{"┤" if m.group(4) == "│" else "┼"}',
+                                    row[1])
                     row[1] = re.sub(r'►(─+)►', r'─\1►', row[1])
                 for r, s in zip(extras, text):
                     r.extend(s)
             # warnings.warn('Unable to visualize non-projective trees.')
             if dep in self and conll.projective:
-                text = conll.to_tree(extras)
+                text = conll.to_tree(extras, main_pos=True)
                 if not show_header:
                     text = text.split('\n')
                     text = '\n'.join(text[2:])
@@ -444,7 +482,7 @@ class Document(dict):
         inplace operation.
 
         Args:
-            i: Keep the element at ``index`` for all ``list``s.
+            i: Keep the element at ``index`` for all ``list``\s.
 
         Returns:
             A squeezed document with only one sentence.

@@ -282,12 +282,12 @@ public class HanLPClient
      * @return Their similarity.
      * @throws IOException HTTP errors.
      */
-    public Float semanticTextualSimilarity(String textA, String textB) throws IOException
+    public Double semanticTextualSimilarity(String textA, String textB) throws IOException
     {
         Map<String, Object> input = new HashMap<>();
         input.put("text", new String[]{textA, textB});
         input.put("language", language);
-        return mapper.readValue(post("/semantic_textual_similarity", input), Float.class);
+        return mapper.readValue(post("/semantic_textual_similarity", input), Double.class);
     }
 
     /**
@@ -297,7 +297,7 @@ public class HanLPClient
      * @return Their similarities.
      * @throws IOException HTTP errors.
      */
-    public List<Float> semanticTextualSimilarity(String[][] text) throws IOException
+    public List<Double> semanticTextualSimilarity(String[][] text) throws IOException
     {
         Map<String, Object> input = new HashMap<>();
         input.put("text", text);
@@ -460,6 +460,24 @@ public class HanLPClient
     }
 
     /**
+     * Abstractive Summarization is the task of generating a short and concise summary that captures the
+     * salient ideas of the source text. The generated summaries potentially contain new phrases and sentences that
+     * may not appear in the source text.
+     *
+     * @param text The text content of the document.
+     * @return Summarization.
+     * @throws IOException HTTP errors.
+     */
+    public String abstractiveSummarization(String text) throws IOException
+    {
+        Map<String, Object> input = new HashMap<>();
+        input.put("text", text);
+        input.put("language", language);
+        //noinspection unchecked
+        return mapper.readValue(post("/abstractive_summarization", input), String.class);
+    }
+
+    /**
      * Text classification is the task of assigning a sentence or document an appropriate category.
      * The categories depend on the chosen dataset and can range from topics.
      *
@@ -471,6 +489,24 @@ public class HanLPClient
     public String textClassification(String text, String model) throws IOException
     {
         return (String) textClassification(text, model, false, false);
+    }
+
+
+    /**
+     * Sentiment analysis is the task of classifying the polarity of a given text. For instance,
+     * a text-based tweet can be categorized into either "positive", "negative", or "neutral".
+     *
+     * @param text The text content of the document.
+     * @return Sentiment polarity as a numerical value which measures how positive the sentiment is.
+     * @throws IOException HTTP errors.
+     */
+    public Double sentimentAnalysis(String text) throws IOException
+    {
+        Map<String, Object> input = new HashMap<>();
+        input.put("text", text);
+        input.put("language", language);
+        //noinspection unchecked
+        return mapper.readValue(post("/sentiment_analysis", input), Double.class);
     }
 
 

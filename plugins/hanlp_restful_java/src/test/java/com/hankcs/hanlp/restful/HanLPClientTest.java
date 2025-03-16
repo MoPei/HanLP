@@ -76,8 +76,16 @@ class HanLPClientTest
     @Test
     void semanticTextualSimilarity() throws IOException
     {
-        Float similarity = client.semanticTextualSimilarity("看图猜一电影名", "看图猜电影");
+        Double similarity = client.semanticTextualSimilarity("看图猜一电影名", "看图猜电影");
         prettyPrint(similarity);
+        List<Double> similarities = client.semanticTextualSimilarity(new String[][]{
+                new String[]{"看图猜一电影名", "看图猜电影"},
+                new String[]{"北京到上海的动车票", "上海到北京的动车票"}
+        });
+        for (Double similarityPerPair : similarities)
+        {
+            prettyPrint(similarityPerPair);
+        }
     }
 
     @Test
@@ -130,6 +138,15 @@ class HanLPClientTest
     }
 
     @Test
+    void abstractiveSummarization() throws IOException
+    {
+        prettyPrint(client.abstractiveSummarization(
+                "每经AI快讯，2月4日，长江证券研究所金属行业首席分析师王鹤涛表示，2023年海外经济衰退，美债现处于历史高位，\n" +
+                        "黄金的趋势是值得关注的；在国内需求修复的过程中，看好大金属品种中的铜铝钢。\n" +
+                        "此外，在细分的小品种里，建议关注两条主线，一是新能源，比如锂、钴、镍、稀土，二是专精特新主线。（央视财经）"));
+    }
+
+    @Test
     void abstractMeaningRepresentationText() throws IOException
     {
         prettyPrint(client.abstractMeaningRepresentation("男孩希望女孩相信他。阿婆主来到北京立方庭参观自然语义科技公司。"));
@@ -157,6 +174,14 @@ class HanLPClientTest
                 "2021年、HanLPv2.1は次世代の最先端多言語NLP技術を本番環境に導入します。",
                 "2021年 HanLPv2.1为生产环境带来次世代最先进的多语种NLP技术。",
         }));
+    }
+
+    @Test
+    void sentimentAnalysis() throws IOException
+    {
+        prettyPrint(client.sentimentAnalysis(
+                "“这是一部男人必看的电影。”人人都这么说。但单纯从性别区分，就会让这电影变狭隘。《肖申克的救赎》突破了男人电影的局限，通篇几乎充满令人难以置信的温馨基调，而电影里最伟大的主题是“希望”。 当我们无奈地遇到了如同肖申克一般囚禁了心灵自由的那种囹圄，我们是无奈的老布鲁克，灰心的瑞德，还是智慧的安迪？运用智慧，信任希望，并且勇敢面对恐惧心理，去打败它？ 经典的电影之所以经典，因为他们都在做同一件事——让你从不同的角度来欣赏希望的美好。"
+        ));
     }
 
     void prettyPrint(Object object) throws JsonProcessingException
